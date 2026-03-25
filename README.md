@@ -43,6 +43,31 @@ A sample credentials file is included as login.sample.py.
 
 For runtime, create login.py with your real values (this file is ignored by Git to avoid leaking secrets).
 
+## Create Client Credentials On The Controller
+
+To access the NATS/Data Hub API with this project, create a client in the u-OS Control Center:
+
+1. Open u-OS Control Center on the controller.
+2. Go to Identity & access -> Clients.
+3. Click Add client.
+4. Create a client (for example `sampleprovider`) and store:
+   - Client ID
+   - Client secret
+5. Configure scopes required by this project, typically:
+   - `hub.variables.provide`
+   - `hub.variables.readwrite`
+6. Copy the values into login.py:
+   - CLIENT_NAME = client name
+   - CLIENT_ID = generated client ID
+   - CLIENT_SECRET = generated client secret
+
+Reference screenshots are available in doc/:
+
+- doc/IoTUeli-Datahub.gif
+- doc/IoTUeli-u-OS.gif
+
+Source attribution for these two screenshots: [uiff/nats-python-uc20](https://github.com/uiff/nats-python-uc20)
+
 ## Running From A Local PC
 
 - This sample project was also successfully run from a local PC using SSH tunneling to the controller.
