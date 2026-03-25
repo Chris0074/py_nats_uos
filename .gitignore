@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.env
+login.py
+provider.log
+*.pub
+iotueli
+key
+*DESKTOP-CHOQ88G*
+node_modules/
+package-lock.json
+nats-node/.env
