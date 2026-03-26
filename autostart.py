@@ -22,9 +22,12 @@ from src.models import VariableStateModel
 from building import building, Switch, Raffstore
             
 
-async def async_main():    
+async def async_main():
+    # Simple push buttons    
     #await Switch(key_in="ur20_16di_p_1.process_data.channel_1.di", key_out="ur20_16do_p_1.process_data.channel_1.do").setup()
     #await Switch(key_in="ur20_16di_p_1.process_data.channel_0.di", key_out="ur20_16do_p_1.process_data.channel_0.do", on_time=5).setup()
+    
+    # Raffstore push buttons
     in_up="ur20_16di_p_1.process_data.channel_0.di"
     in_down="ur20_16di_p_1.process_data.channel_1.di"
     out_up="ur20_16do_p_1.process_data.channel_0.do"
@@ -33,9 +36,9 @@ async def async_main():
 
     try:
         while True:            
-            await asyncio.sleep(1)
+            await asyncio.sleep(10)
     except KeyboardInterrupt:
-        print("Beenden...")
+        print("Stop...")
     finally:
         #await access_provider.close()
         pass
