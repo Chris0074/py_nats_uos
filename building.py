@@ -15,25 +15,33 @@ from src.data_hub import AccessProvider
 from src.models import VariableInfo, VariableStateModel
 
 class Building():
-    setup_done: bool = False
-
+    _access_provider: AccessProvider | None = None
+    _variables_names: dict[str, int] | None = None
+    _variables_ids: dict[int, VariableInfo] | None = None
+    _setup_finished = False
+    
     def __init__(self, access_provider: AccessProvider | None = None):
-        self.access: AccessProvider = access_provider or AccessProvider(
-            host=NATS_HOST,
-            provider_id=PROVIDER_SBM,
+        if Building._access_provider is None:
+            print("Init-Singleton carried out.")
+            Building._access_provider = access_provider or AccessProvider(
+                host=NATS_HOST,
+                provider_id=PROVIDER_SBM,
             client_name=CLIENT_NAME,
             client_id=CLIENT_ID,
             client_secret=CLIENT_SECRET,
-        )
-        self.variables_names: dict[str, int] | None = None
-        self.variables_ids: dict[int, VariableInfo] | None = None
+            )
+        self.access = Building._access_provider
+        self.variables_names = Building._variables_names
+        self.variables_ids = Building._variables_ids
 
     async def setup(self):
-        if not Building.setup_done:
+        if not Building._setup_finished:
             await self.access.connect()
             #print(f"Info: Connected to data hub.")
-            self.variables_names, self.variables_ids = await self.access.get_definition()
-            Building.setup_done = True
+            Building._variables_names, Building._variables_ids = await self.access.get_definition()
+            Building._setup_finished = True
+        self.variables_names = Building._variables_names
+        self.variables_ids = Building._variables_ids
 
     def require_variable_names(self) -> dict[str, int]:
         if self.variables_names is None:
@@ -78,32 +86,33 @@ class Building():
             return False if self._task is None else True
 
 
-building = Building()
+# building = Building()
 
-class Switch:
+class Switch(Building):
     def __init__(self, key_in: str, key_out: str, on_time: int | None = None):
+        super().__init__()
         self.key_in = key_in
         self.key_out = key_out
         self.on_time = on_time
 
-        self._building = building
+        #self._building = building
         self._timer = None
 
     async def setup(self):
-        await self._building.setup()
-        variable_names = self._building.require_variable_names()
+        await super().setup()
+        variable_names = self.require_variable_names()
         print(f"Debug: Subscribed to changes on {self.key_in} with variable ID {variable_names[self.key_in]}")
-        await self._building.access.subscribe_change(self.key_in, self.on_change_di)
+        await self.access.subscribe_change(self.key_in, self.on_change_di)
 
     def sanity_check(self, id: int):
-        variable_names = self._building.require_variable_names()
+        variable_names = self.require_variable_names()
         if id != variable_names[self.key_in]:
             raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected: {self.key_in}")
 
     
     def _timer_callback(self):
         # print(f"Debug: Timer expired, set output {self.key_out} off.")
-        asyncio.create_task(self._building.access.write_value(self.key_out, False))
+        asyncio.create_task(self.access.write_value(self.key_out, False))
 
     def _timer_kill(self):
         if self._timer:
@@ -111,13 +120,13 @@ class Switch:
             self._timer = None
 
     def _set_value(self, value: bool):
-        asyncio.create_task(self._building.access.write_value(self.key_out, value))
+        asyncio.create_task(self.access.write_value(self.key_out, value))
         # Is an automatic off timer requested ?
         if self.on_time is not None:
             if value is False:
                 self._timer_kill()
             else:
-                self._timer = self._building.Timer(timeout=self.on_time, callback=self._timer_callback)
+                self._timer = self.Timer(timeout=self.on_time, callback=self._timer_callback)
                 self._timer.start()
 
     async def on_change_di(self, id: int, snapshot: dict[int, VariableStateModel]):
@@ -129,14 +138,15 @@ class Switch:
         if snapshot[id].value is True:
             self._timer_kill()
             # Toogle output value
-            variable_names = self._building.require_variable_names()
+            variable_names = self.require_variable_names()
             out_value = snapshot[variable_names[self.key_out]].value
             out_value = not out_value
             self._set_value(out_value)
 
 
-class Raffstore:
+class Raffstore(Building):
     def __init__(self, in_up: str, in_down: str, out_up: str, out_down: str, run_time: int = 50):
+        super().__init__()
         self.in_up = in_up
         self.in_down = in_down
         self.out_up = out_up
@@ -144,18 +154,17 @@ class Raffstore:
         self.run_sec = run_time
         self.short_run_sec = 2
         self.wait_sec = 0.3
-
-        self._building = building        
+     
         self._up_active = False
         self._down_active = False
-        self._delay_timer = self._building.Timer(timeout=self.wait_sec)
-        self._short_run_timer = self._building.Timer(timeout=self.short_run_sec)
-        self._long_run_timer = self._building.Timer(timeout=self.run_sec)
+        self._delay_timer = self.Timer(timeout=self.wait_sec)
+        self._short_run_timer = self.Timer(timeout=self.short_run_sec)
+        self._long_run_timer = self.Timer(timeout=self.run_sec)
 
     async def setup(self):
-        await self._building.setup()
-        await self._building.access.subscribe_change(self.in_up, self.on_change_up)
-        await self._building.access.subscribe_change(self.in_down, self.on_change_down)
+        await super().setup()
+        await self.access.subscribe_change(self.in_up, self.on_change_up)
+        await self.access.subscribe_change(self.in_down, self.on_change_down)
         
     def _start_long_run_timer(self, key: str):
         self._short_run_timer.kill()
@@ -164,12 +173,12 @@ class Raffstore:
 
     def _set_value_true(self, key: str):
         self._delay_timer.kill()
-        asyncio.create_task(self._building.access.write_value(key, True))        
+        asyncio.create_task(self.access.write_value(key, True))        
         self._short_run_timer.set_callback(function=lambda: self._start_long_run_timer(key))
         self._short_run_timer.start()        
 
     def _set_value_false(self, key: str):
-        asyncio.create_task(self._building.access.write_value(key, False))
+        asyncio.create_task(self.access.write_value(key, False))
         self._long_run_timer.kill()
         self._up_active = False
         self._down_active = False
@@ -181,21 +190,21 @@ class Raffstore:
         
         if self._up_active:            
             self._up_active = False
-            asyncio.create_task(self._building.access.write_value(self.out_up, False))
+            asyncio.create_task(self.access.write_value(self.out_up, False))
         if self._down_active:                        
-            asyncio.create_task(self._building.access.write_value(self.out_down, False))
+            asyncio.create_task(self.access.write_value(self.out_down, False))
             self._down_active = False        
 
     async def on_change_up(self, id: int, snapshot: dict[int, VariableStateModel]):
         in_value = snapshot[id].value        
-        variable_names = self._building.require_variable_names()
+        variable_names = self.require_variable_names()
         # Sanity check 
         if id != variable_names[self.in_up]:
             raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected: {self.in_up}")
         print(f"Debug: Input {self.in_up} changed to {in_value}")
         
         # To be on the save side switch off counterpart
-        await self._building.access.write_value(self.out_down, False)
+        await self.access.write_value(self.out_down, False)
 
         out_value = snapshot[variable_names[self.out_up]].value
         if in_value is True and out_value is False:
@@ -215,14 +224,14 @@ class Raffstore:
         
     async def on_change_down(self, id: int, snapshot: dict[int, VariableStateModel]):
         in_value = snapshot[id].value        
-        variable_names = self._building.require_variable_names()
+        variable_names = self.require_variable_names()
         # Sanity check 
         if id != variable_names[self.in_down]:
             raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected: {self.in_down}")
         print(f"Debug: Input {self.in_down} changed to {in_value}")
         
         # To be on the save side switch off counterpart
-        await self._building.access.write_value(self.out_up, False)
+        await self.access.write_value(self.out_up, False)
 
         out_value = snapshot[variable_names[self.out_down]].value
         if in_value is True and out_value is False:

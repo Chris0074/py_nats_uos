@@ -37,6 +37,24 @@ The root Python entry point is autostart.py. It contains an example implementati
 
    python autostart.py
 
+## Testing
+
+The project includes unit tests to verify the behavior of the building control classes.
+
+### Running Tests
+
+1. Ensure you have activated the virtual environment and installed dependencies as described in Setup.
+2. Run the tests using pytest:
+
+   python -m pytest tests/ -v
+
+### Test Coverage
+
+- `tests/test_building.py`: Tests for the Building base class and Raffstore/Switch subclasses
+  - Verifies that Raffstore instances are independent (not singletons)
+  - Confirms shared access provider behavior across instances
+  - Tests timer and state management isolation
+
 ## Credentials
 
 A sample credentials file is included as login.sample.py.
