@@ -1,4 +1,4 @@
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterable
 import sys
 import pathlib
 import asyncio
@@ -89,25 +89,31 @@ class Building():
 # building = Building()
 
 class Switch(Building):
-    def __init__(self, key_in: str, key_out: str, on_time: int | None = None):
+    def __init__(self, key_in: str|Iterable[str], key_out: str, on_time: int | None = None):
         super().__init__()
         self.key_in = key_in
         self.key_out = key_out
         self.on_time = on_time
+        if isinstance(key_in, str):
+            self.key_in = [key_in]
 
         #self._building = building
         self._timer = None
 
     async def setup(self):
         await super().setup()
-        variable_names = self.require_variable_names()
-        print(f"Debug: Subscribed to changes on {self.key_in} with variable ID {variable_names[self.key_in]}")
-        await self.access.subscribe_change(self.key_in, self.on_change_di)
+        for key in self.key_in:
+            print(f"Debug: Subscribed to changes on {self.key_in} with variable ID {self.require_variable_names()[key]}")
+            await self.access.subscribe_change(key, self.on_change_di)
+            
+    def _verify_subscribed_ids(self, id: int, subscribed_keys: Iterable[str]):
+        names = self.require_variable_names()
+        ids = [names[key] for key in subscribed_keys]
+        if id not in ids:
+            raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected one of: {ids}")
 
     def sanity_check(self, id: int):
-        variable_names = self.require_variable_names()
-        if id != variable_names[self.key_in]:
-            raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected: {self.key_in}")
+        self._verify_subscribed_ids(id, self.key_in)
 
     
     def _timer_callback(self):
@@ -133,7 +139,7 @@ class Switch(Building):
         in_value = snapshot[id].value
         # Sanity check 
         self.sanity_check(id)
-        print(f"Debug: Input {self .key_in} changed to {in_value}")
+        print(f"Debug: Input {self.key_in} changed to {in_value}")
 
         if snapshot[id].value is True:
             self._timer_kill()
@@ -145,15 +151,21 @@ class Switch(Building):
 
 
 class Raffstore(Building):
-    def __init__(self, in_up: str, in_down: str, out_up: str, out_down: str, run_time: int = 50):
+    def __init__(self, in_up: str|Iterable[str], in_down: str|Iterable[str], out_up: str, out_down: str, run_time: int = 50):
         super().__init__()
         self.in_up = in_up
         self.in_down = in_down
         self.out_up = out_up
         self.out_down = out_down
         self.run_sec = run_time
-        self.short_run_sec = 2
-        self.wait_sec = 0.3
+        self.short_run_sec = 1.5
+        self.wait_sec = 0.1
+        
+        if isinstance(in_up, str):
+            self.in_up = [in_up]
+        if isinstance(in_down, str):
+            self.in_down = [in_down]
+
      
         self._up_active = False
         self._down_active = False
@@ -163,8 +175,12 @@ class Raffstore(Building):
 
     async def setup(self):
         await super().setup()
-        await self.access.subscribe_change(self.in_up, self.on_change_up)
-        await self.access.subscribe_change(self.in_down, self.on_change_down)
+        for up in self.in_up:
+             #print(f"Debug: Subscribed to changes on {up}")
+             await self.access.subscribe_change(up, self.on_change_up)
+        for down in self.in_down:
+             #print(f"Debug: Subscribed to changes on {down}")
+             await self.access.subscribe_change(down, self.on_change_down)
         
     def _start_long_run_timer(self, key: str):
         self._short_run_timer.kill()
@@ -193,14 +209,19 @@ class Raffstore(Building):
             asyncio.create_task(self.access.write_value(self.out_up, False))
         if self._down_active:                        
             asyncio.create_task(self.access.write_value(self.out_down, False))
-            self._down_active = False        
+            self._down_active = False
+            
+    def _verify_subscribed_ids(self, id: int, subscribed_keys: Iterable[str]):
+        names = self.require_variable_names()
+        ids = [names[key] for key in subscribed_keys]
+        if id not in ids:
+            raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected one of: {ids}")
 
     async def on_change_up(self, id: int, snapshot: dict[int, VariableStateModel]):
         in_value = snapshot[id].value        
         variable_names = self.require_variable_names()
         # Sanity check 
-        if id != variable_names[self.in_up]:
-            raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected: {self.in_up}")
+        self._verify_subscribed_ids(id, self.in_up)
         print(f"Debug: Input {self.in_up} changed to {in_value}")
         
         # To be on the save side switch off counterpart
@@ -226,8 +247,7 @@ class Raffstore(Building):
         in_value = snapshot[id].value        
         variable_names = self.require_variable_names()
         # Sanity check 
-        if id != variable_names[self.in_down]:
-            raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected: {self.in_down}")
+        self._verify_subscribed_ids(id, self.in_down)
         print(f"Debug: Input {self.in_down} changed to {in_value}")
         
         # To be on the save side switch off counterpart
