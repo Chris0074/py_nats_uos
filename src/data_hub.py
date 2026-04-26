@@ -70,7 +70,7 @@ class AccessProvider(DataHub):
         self.provider_fingerprint: int | None = None
         self.variable_ids: dict[int, VariableInfo] | None = None
         self.variable_name: dict[str, int] | None = None
-        self._callback_on_change: dict[int, Callable[[int, dict[int,VariableStateModel]], None | Awaitable[None]]] = {}
+        self._registered_callbacks: dict[int, list[Callable[[int, dict[int,VariableStateModel]], None | Awaitable[None]]]] = {}
         self.already_subscribed_to_change: bool = False
         self.snapshot: dict[int, VariableStateModel] | None = None
 
@@ -314,18 +314,23 @@ class AccessProvider(DataHub):
             return
         var_ids = {var.id: var for var in changed_variables}
         self.snapshot = await self.request_snapshot()
-        for id in self._callback_on_change.keys():
+                    
+        for id, callbacks in self._registered_callbacks.items():
             if id in var_ids.keys():
-                callback_result = self._callback_on_change[id](id, self.snapshot)
-                if inspect.isawaitable(callback_result):
-                    await callback_result
+                for cllbck in callbacks:
+                    callback_result = cllbck(id, self.snapshot)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
 
     
     async def subscribe_change(self, key_id: str | int, callback: Callable[[int, dict[int, VariableStateModel]], None | Awaitable[None]]) -> None:
         conn = self.verify_startup()
 
         variable = self.get_variable_from_definition(key_id)
-        self._callback_on_change[variable.id] = callback
+        if self._registered_callbacks.get(variable.id) is None:
+            self._registered_callbacks[variable.id] = [callback]
+        elif callback not in self._registered_callbacks[variable.id]: 
+            self._registered_callbacks[variable.id].append(callback)
 
         if not self.already_subscribed_to_change:
             subject = vars_changed_event(self.provider_id)
