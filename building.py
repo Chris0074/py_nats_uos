@@ -1,8 +1,10 @@
 from typing import Awaitable, Callable, Iterable
+from collections.abc import Iterable as AbcIterable
 import sys
 import pathlib
 import asyncio
 import inspect
+import datetime
 
 # Add the project root to Python path to enable absolute imports
 ROOT_PATH = pathlib.Path(__file__).resolve().parent
@@ -80,13 +82,83 @@ class Building():
                 
         def set_callback(self, function: Callable[[], None | Awaitable[None]]):
             self._callback = function
+            
+        def set_timeout(self, timeout: float):
+            self._timeout = timeout
                 
         @property
         def is_running(self):
             return False if self._task is None else True
 
 
-# building = Building()
+class CyclicTask:
+    """Run one or more callbacks every day at a fixed time.
+
+    Example:
+        task = CyclicTask(hour=8, minute=0, callback=my_async_function)
+        task.start()
+
+        task = CyclicTask(hour=8, minute=0, callback=[task_a, task_b])
+        task.start()
+    """
+
+    def __init__(
+        self,
+        callback: Callable[[], None] | Iterable[Callable[[], None]],
+        hour: int,
+        minute: int = 0,
+    ):
+        if isinstance(callback, AbcIterable) and not callable(callback):
+            self.callbacks = list(callback)
+        else:
+            self.callbacks = [callback]
+        self.hour = hour
+        self.minute = minute
+        self._task: asyncio.Task | None = None
+        self._cancelled = False
+
+    def _next_run_time(self) -> datetime.datetime:
+        now = datetime.datetime.now()
+        next_run = now.replace(hour=self.hour, minute=self.minute, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += datetime.timedelta(days=1)
+        return next_run
+
+    async def _run(self):
+        try:
+            while not self._cancelled:
+                next_run = self._next_run_time()
+                delay = (next_run - datetime.datetime.now()).total_seconds()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if self._cancelled:
+                    break
+                for callback in self.callbacks:
+                    #print(f"Debug: Running cyclic callback {callback} at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    callback_result = callback()
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._task = None
+
+    def start(self):
+        if self._task is not None:
+            return
+        self._cancelled = False
+        self._task = asyncio.create_task(self._run())
+        #'print(f"CyclicTask started, will run daily at {self.hour:02d}:{self.minute:02d}.")
+
+    def stop(self):
+        self._cancelled = True
+        if self._task is not None:
+            self._task.cancel()
+
+    @property
+    def is_running(self) -> bool:
+        return self._task is not None
+
 
 class Switch(Building):
     def __init__(self, key_in: str|Iterable[str], key_out: str, on_time: int | None = None):
@@ -97,7 +169,6 @@ class Switch(Building):
         if isinstance(key_in, str):
             self.key_in = [key_in]
 
-        #self._building = building
         self._timer = None
 
     async def setup(self):
@@ -172,37 +243,85 @@ class Raffstore(Building):
         self._delay_timer = self.Timer(timeout=self.wait_sec)
         self._short_run_timer = self.Timer(timeout=self.short_run_sec)
         self._long_run_timer = self.Timer(timeout=self.run_sec)
+        self._pulse_timer = self.Timer(timeout=0)
 
     async def setup(self):
         await super().setup()
         for up in self.in_up:
              #print(f"Debug: Subscribed to changes on {up}")
-             await self.access.subscribe_change(up, self.on_change_up)
+             await self.access.subscribe_change(up, self._on_change_up)
         for down in self.in_down:
              #print(f"Debug: Subscribed to changes on {down}")
-             await self.access.subscribe_change(down, self.on_change_down)
+             await self.access.subscribe_change(down, self._on_change_down)
+             
+    def up(self, time_in_sec: float):
+        # To be on the save side switch off counterpart
+        self._set_value_false(self.out_down)
+        self._stop_active_task()
+        self._up_active = True
+        time_in_sec += self.wait_sec
+        self._delay_timer.set_callback(function=lambda: self._set_value_true_pulse(self.out_up, time_in_sec))
+        self._delay_timer.start()
         
+    def down(self, time_in_sec: float):
+        # To be on the save side switch off counterpart
+        self._set_value_false(self.out_up)
+        self._stop_active_task()
+        self._down_active = True
+        time_in_sec += self.wait_sec
+        self._delay_timer.set_callback(function=lambda: self._set_value_true_pulse(self.out_down, time_in_sec))
+        self._delay_timer.start()
+             
+    def up_long(self):
+        # To be on the save side switch off counterpart
+        self._set_value_false(self.out_down)
+        self._up()
+    
+    def down_long(self):
+        # To be on the save side switch off counterpart
+        self._set_value_false(self.out_up)
+        self._down()
+        
+    def _up(self):
+        self._stop_active_task()
+        self._up_active = True
+        self._delay_timer.set_callback(function=lambda: self._set_value_true(self.out_up))
+        
+    def _down(self):
+        self._stop_active_task()
+        self._down_active = True
+        self._delay_timer.set_callback(function=lambda: self._set_value_true(self.out_down))
+
     def _start_long_run_timer(self, key: str):
         self._short_run_timer.kill()
         self._long_run_timer.set_callback(function=lambda: self._set_value_false(key))
-        self._long_run_timer.start()        
+        self._long_run_timer.start()
 
     def _set_value_true(self, key: str):
         self._delay_timer.kill()
         asyncio.create_task(self.access.write_value(key, True))        
         self._short_run_timer.set_callback(function=lambda: self._start_long_run_timer(key))
-        self._short_run_timer.start()        
+        self._short_run_timer.start()
 
+    # TODO: The call of this function can be replaced by "self._stop_active_task"
     def _set_value_false(self, key: str):
         asyncio.create_task(self.access.write_value(key, False))
         self._long_run_timer.kill()
         self._up_active = False
         self._down_active = False
         
+    def _set_value_true_pulse(self, key: str, time_to_stop: float):
+        self._delay_timer.kill()
+        asyncio.create_task(self.access.write_value(key, True))
+        self._pulse_timer.set_timeout(time_to_stop)        
+        self._pulse_timer.set_callback(function=self._stop_active_task)
+        self._pulse_timer.start()  
+        
     def _stop_active_task(self):
         self._delay_timer.kill()
         self._short_run_timer.kill()                
-        self._long_run_timer.kill()            
+        self._long_run_timer.kill()
+        self._pulse_timer.kill()
         
         if self._up_active:            
             self._up_active = False
@@ -217,7 +336,7 @@ class Raffstore(Building):
         if id not in ids:
             raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected one of: {ids}")
 
-    async def on_change_up(self, id: int, snapshot: dict[int, VariableStateModel]):
+    async def _on_change_up(self, id: int, snapshot: dict[int, VariableStateModel]):
         in_value = snapshot[id].value        
         variable_names = self.require_variable_names()
         # Sanity check 
@@ -225,13 +344,11 @@ class Raffstore(Building):
         print(f"Debug: Input {self.in_up} changed to {in_value}")
         
         # To be on the save side switch off counterpart
-        await self.access.write_value(self.out_down, False)
+        asyncio.create_task(self.access.write_value(self.out_down, False))
 
         out_value = snapshot[variable_names[self.out_up]].value
-        if in_value is True and out_value is False:
-            self._stop_active_task()
-            self._up_active = True
-            self._delay_timer.set_callback(function=lambda: self._set_value_true(self.out_up))
+        if in_value is True and out_value is False:            
+            self._up()
             self._delay_timer.start()            
         elif in_value is False and out_value is True:
             if self._short_run_timer.is_running:
@@ -241,9 +358,8 @@ class Raffstore(Building):
         elif in_value is False and out_value is False:
             # Raffstore is fully closed, reset timers and states
             self._stop_active_task()
-            pass
         
-    async def on_change_down(self, id: int, snapshot: dict[int, VariableStateModel]):
+    async def _on_change_down(self, id: int, snapshot: dict[int, VariableStateModel]):
         in_value = snapshot[id].value        
         variable_names = self.require_variable_names()
         # Sanity check 
@@ -251,13 +367,11 @@ class Raffstore(Building):
         print(f"Debug: Input {self.in_down} changed to {in_value}")
         
         # To be on the save side switch off counterpart
-        await self.access.write_value(self.out_up, False)
+        asyncio.create_task(self.access.write_value(self.out_up, False))
 
         out_value = snapshot[variable_names[self.out_down]].value
-        if in_value is True and out_value is False:
-            self._stop_active_task()
-            self._down_active = True
-            self._delay_timer.set_callback(function=lambda: self._set_value_true(self.out_down))
+        if in_value is True and out_value is False:            
+            self._down()
             self._delay_timer.start()
         elif in_value is False and out_value is True:
             if self._short_run_timer.is_running:
