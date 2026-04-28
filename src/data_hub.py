@@ -1,5 +1,6 @@
 import time
 import inspect
+import logging
 
 from typing import Callable, Optional, Awaitable
 from dataclasses import dataclass, field
@@ -48,7 +49,7 @@ class DataHub:
         )
         await nats_conn.connect()
         self.nats_connection = nats_conn
-        print("Connected to NATS server at", self.host + " as " + self.client_name)
+        logging.info("Connected to NATS server at %s as %s", self.host, self.client_name)
 
     def close(self):
         if self.nats_connection:
