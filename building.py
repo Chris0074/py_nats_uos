@@ -24,7 +24,7 @@ class Building():
     
     def __init__(self, access_provider: AccessProvider | None = None):
         if Building._access_provider is None:
-            print("Init-Singleton carried out.")
+            #print("Init-Singleton carried out.")
             Building._access_provider = access_provider or AccessProvider(
                 host=NATS_HOST,
                 provider_id=PROVIDER_SBM,
@@ -210,7 +210,7 @@ class Switch(Building):
         in_value = snapshot[id].value
         # Sanity check 
         self.sanity_check(id)
-        print(f"Debug: Input {self.key_in} changed to {in_value}")
+        # print(f"Debug: Input {self.key_in} changed to {in_value}")
 
         if snapshot[id].value is True:
             self._timer_kill()
@@ -341,7 +341,7 @@ class Raffstore(Building):
         variable_names = self.require_variable_names()
         # Sanity check 
         self._verify_subscribed_ids(id, self.in_up)
-        print(f"Debug: Input {self.in_up} changed to {in_value}")
+        # print(f"Debug: Input {self.in_up} changed to {in_value}")
         
         # To be on the save side switch off counterpart
         asyncio.create_task(self.access.write_value(self.out_down, False))
@@ -364,7 +364,7 @@ class Raffstore(Building):
         variable_names = self.require_variable_names()
         # Sanity check 
         self._verify_subscribed_ids(id, self.in_down)
-        print(f"Debug: Input {self.in_down} changed to {in_value}")
+        # print(f"Debug: Input {self.in_down} changed to {in_value}")
         
         # To be on the save side switch off counterpart
         asyncio.create_task(self.access.write_value(self.out_up, False))
