@@ -128,9 +128,13 @@ class CyclicTask:
         try:
             while not self._cancelled:
                 next_run = self._next_run_time()
-                delay = (next_run - datetime.datetime.now()).total_seconds()
-                if delay > 0:
-                    await asyncio.sleep(delay)
+                now = datetime.datetime.now()
+                while next_run > now:
+                    delay = (next_run - now).total_seconds()
+                    # print(f"Debug: Cyclic task sleeping for {delay:.1f} seconds until next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+                    # Sleeping is set to max 360 seconds as the timer is not very precise it seems.
+                    await asyncio.sleep(min(360, delay))
+                    now = datetime.datetime.now()
                 if self._cancelled:
                     break
                 for callback in self.callbacks:
@@ -207,9 +211,9 @@ class Switch(Building):
                 self._timer.start()
 
     async def on_change_di(self, id: int, snapshot: dict[int, VariableStateModel]):
-        in_value = snapshot[id].value
         # Sanity check 
         self.sanity_check(id)
+        # in_value = snapshot[id].value
         # print(f"Debug: Input {self.key_in} changed to {in_value}")
 
         if snapshot[id].value is True:
@@ -286,11 +290,13 @@ class Raffstore(Building):
         self._stop_active_task()
         self._up_active = True
         self._delay_timer.set_callback(function=lambda: self._set_value_true(self.out_up))
+        self._delay_timer.start()
         
     def _down(self):
         self._stop_active_task()
         self._down_active = True
         self._delay_timer.set_callback(function=lambda: self._set_value_true(self.out_down))
+        self._delay_timer.start()
 
     def _start_long_run_timer(self, key: str):
         self._short_run_timer.kill()
@@ -344,12 +350,12 @@ class Raffstore(Building):
         # print(f"Debug: Input {self.in_up} changed to {in_value}")
         
         # To be on the save side switch off counterpart
+        # TODO: This should not be executed unconditionally.
         asyncio.create_task(self.access.write_value(self.out_down, False))
 
         out_value = snapshot[variable_names[self.out_up]].value
         if in_value is True and out_value is False:            
-            self._up()
-            self._delay_timer.start()            
+            self._up()            
         elif in_value is False and out_value is True:
             if self._short_run_timer.is_running:
                 self._stop_active_task()
@@ -372,7 +378,6 @@ class Raffstore(Building):
         out_value = snapshot[variable_names[self.out_down]].value
         if in_value is True and out_value is False:            
             self._down()
-            self._delay_timer.start()
         elif in_value is False and out_value is True:
             if self._short_run_timer.is_running:
                 self._stop_active_task()                
