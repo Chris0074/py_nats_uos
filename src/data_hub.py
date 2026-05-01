@@ -73,7 +73,7 @@ class AccessProvider(DataHub):
         self.variable_name: dict[str, int] | None = None
         self._registered_callbacks: dict[int, list[Callable[[int, dict[int,VariableStateModel]], None | Awaitable[None]]]] = {}
         self.already_subscribed_to_change: bool = False
-        self.snapshot: dict[int, VariableStateModel] | None = None
+        self.snapshot: dict[int, VariableStateModel] = {}
 
     def _decode_definition_models(self, definition) -> tuple[dict[str,int], dict[int, VariableInfo]]:
         var_names: dict[str, int] = {}
@@ -310,18 +310,19 @@ class AccessProvider(DataHub):
     
     async def _handle_event(self, msg: Msg):
         event = VariablesChangedEvent.GetRootAsVariablesChangedEvent(msg.data, 0)
-        changed_variables = self._update_states(event.ChangedVariables())
+        changed_variables: list[VariableStateModel] = self._update_states(event.ChangedVariables())
         if not changed_variables:
             return
+        # update snapshot with changed variables
+        self.snapshot.update({var.id: var for var in changed_variables})
         var_ids = {var.id: var for var in changed_variables}
-        self.snapshot = await self.request_snapshot()
                     
         for id, callbacks in self._registered_callbacks.items():
             if id in var_ids.keys():
                 for cllbck in callbacks:
-                    callback_result = cllbck(id, self.snapshot)
-                    if inspect.isawaitable(callback_result):
-                        await callback_result
+                    result = cllbck(id, self.snapshot)
+                    if inspect.isawaitable(result):
+                        await result
 
     
     async def subscribe_change(self, key_id: str | int, callback: Callable[[int, dict[int, VariableStateModel]], None | Awaitable[None]]) -> None:
@@ -337,7 +338,11 @@ class AccessProvider(DataHub):
             subject = vars_changed_event(self.provider_id)
             #print(f"Subscribing to changes of variable '{variable.key}' (ID {variable.id}) on subject '{subject}'")
             await conn.subscribe(subject, callback=self._handle_event)
-            self.already_subscribed_to_change = True        
+            self.already_subscribed_to_change = True
+            # Read snapshot to have an initial state of all variables. 
+            # This is needed to provide the variable states in the callbacks for variable changes 
+            # and to have a consistent state when the user reads variable values.
+            self.snapshot = await self.request_snapshot()     
 
     async def request_snapshot(self) -> dict[int, VariableStateModel]:
         self._verify_connection()        
