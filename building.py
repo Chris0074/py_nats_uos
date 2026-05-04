@@ -5,6 +5,7 @@ import pathlib
 import asyncio
 import inspect
 import datetime
+from zoneinfo import ZoneInfo
 
 # Add the project root to Python path to enable absolute imports
 ROOT_PATH = pathlib.Path(__file__).resolve().parent
@@ -101,6 +102,8 @@ class CyclicTask:
         task = CyclicTask(hour=8, minute=0, callback=[task_a, task_b])
         task.start()
     """
+    # Set a timezone
+    time_zone = ZoneInfo("Europe/Vienna")
 
     def __init__(
         self,
@@ -116,9 +119,12 @@ class CyclicTask:
         self.minute = minute
         self._task: asyncio.Task | None = None
         self._cancelled = False
+        
+    def _now(self) -> datetime.datetime:
+        return datetime.datetime.now(self.time_zone)
 
     def _next_run_time(self) -> datetime.datetime:
-        now = datetime.datetime.now()
+        now = self._now()
         next_run = now.replace(hour=self.hour, minute=self.minute, second=0, microsecond=0)
         if next_run <= now:
             next_run += datetime.timedelta(days=1)
@@ -128,17 +134,18 @@ class CyclicTask:
         try:
             while not self._cancelled:
                 next_run = self._next_run_time()
-                now = datetime.datetime.now()
+                now = self._now()
                 while next_run > now:
                     delay = (next_run - now).total_seconds()
                     # print(f"Debug: Cyclic task sleeping for {delay:.1f} seconds until next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-                    # Sleeping is set to max 360 seconds as the timer is not very precise it seems.
-                    await asyncio.sleep(min(360, delay))
-                    now = datetime.datetime.now()
+                    # Sleeping is set to max 3600 seconds. If the next run is more than one hour away, the loop will wake up every hour 
+                    # to check if the next run time has changed (e.g. due to daylight saving time changes).
+                    await asyncio.sleep(min(3600, delay))
+                    now = self._now()
                 if self._cancelled:
                     break
                 for callback in self.callbacks:
-                    #print(f"Debug: Running cyclic callback {callback} at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    #print(f"Debug: Running cyclic callback {callback} at {self.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     callback_result = callback()
                     if inspect.isawaitable(callback_result):
                         await callback_result
@@ -350,8 +357,8 @@ class Raffstore(Building):
         # print(f"Debug: Input {self.in_up} changed to {in_value}")
         
         # To be on the save side switch off counterpart
-        # TODO: This should not be executed unconditionally.
-        asyncio.create_task(self.access.write_value(self.out_down, False))
+        if snapshot[variable_names[self.out_down]].value is True:
+            asyncio.create_task(self.access.write_value(self.out_down, False))
 
         out_value = snapshot[variable_names[self.out_up]].value
         if in_value is True and out_value is False:            
@@ -373,7 +380,8 @@ class Raffstore(Building):
         # print(f"Debug: Input {self.in_down} changed to {in_value}")
         
         # To be on the save side switch off counterpart
-        asyncio.create_task(self.access.write_value(self.out_up, False))
+        if snapshot[variable_names[self.out_up]].value is True:
+            asyncio.create_task(self.access.write_value(self.out_up, False))
 
         out_value = snapshot[variable_names[self.out_down]].value
         if in_value is True and out_value is False:            
