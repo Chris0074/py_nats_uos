@@ -1,4 +1,4 @@
-from typing import Awaitable, Callable, Iterable
+from typing import Awaitable, Callable, Iterable, Tuple
 from collections.abc import Iterable as AbcIterable
 import sys
 import pathlib
@@ -172,20 +172,18 @@ class CyclicTask:
 
 
 class Switch(Building):
-    def __init__(self, key_in: str|Iterable[str], key_out: str, on_time: int | None = None):
+    def __init__(self, key_in: str|Iterable[str], key_out: str|Iterable[str], on_time: int | None = None):
         super().__init__()
-        self.key_in = key_in
-        self.key_out = key_out
+        self.key_in = [key_in,] if isinstance(key_in, str) else key_in
+        self.key_out = [key_out,] if isinstance(key_out, str) else key_out
         self.on_time = on_time
-        if isinstance(key_in, str):
-            self.key_in = [key_in]
 
         self._timer = None
 
     async def setup(self):
         await super().setup()
         for key in self.key_in:
-            print(f"Debug: Subscribed to changes on {self.key_in} with variable ID {self.require_variable_names()[key]}")
+            # print(f"Debug: Subscribed to changes on {self.key_in} with variable ID {self.require_variable_names()[key]}")
             await self.access.subscribe_change(key, self.on_change_di)
             
     def _verify_subscribed_ids(self, id: int, subscribed_keys: Iterable[str]):
@@ -200,7 +198,8 @@ class Switch(Building):
     
     def _timer_callback(self):
         # print(f"Debug: Timer expired, set output {self.key_out} off.")
-        asyncio.create_task(self.access.write_value(self.key_out, False))
+        for out in self.key_out:
+            asyncio.create_task(self.access.write_value(out, False))
 
     def _timer_kill(self):
         if self._timer:
@@ -208,7 +207,63 @@ class Switch(Building):
             self._timer = None
 
     def _set_value(self, value: bool):
-        asyncio.create_task(self.access.write_value(self.key_out, value))
+        for out in self.key_out:
+            asyncio.create_task(self.access.write_value(out, value))
+            
+        # Is an automatic off timer requested ?
+        if self.on_time is not None and value is True:
+            self._timer = self.Timer(timeout=self.on_time, callback=self._timer_callback)
+            self._timer.start()
+
+    async def on_change_di(self, id: int, snapshot: dict[int, VariableStateModel]):
+        # Sanity check 
+        self.sanity_check(id)
+        # print(f"Debug: Input {self.key_in} changed to {snapshot[id].value}")
+        if snapshot[id].value is True:
+            self._timer_kill()
+            self._set_value(True)
+        else:
+            if self._timer is None:
+                self._set_value(False)
+
+class Button(Building):
+    def __init__(self, key_in: str|Iterable[str], key_out: str|Tuple[str], on_time: int | None = None):
+        super().__init__()
+        self.key_in: Iterable[str] = [key_in,] if isinstance(key_in, str) else key_in
+        self.key_out: Tuple[str] = (key_out,) if isinstance(key_out, str) else key_out
+        self.on_time = on_time
+
+        self._timer = None
+
+    async def setup(self):
+        await super().setup()
+        for key in self.key_in:
+            # print(f"Debug: Subscribed to changes on {self.key_in} with variable ID {self.require_variable_names()[key]}")
+            await self.access.subscribe_change(key, self.on_change_di)
+            
+    def _verify_subscribed_ids(self, id: int, subscribed_keys: Iterable[str]):
+        names = self.require_variable_names()
+        ids = [names[key] for key in subscribed_keys]
+        if id not in ids:
+            raise ValueError(f"Internal Error: Unexpected variable ID: {id}, expected one of: {ids}")
+
+    def sanity_check(self, id: int):
+        self._verify_subscribed_ids(id, self.key_in)
+
+    
+    def _timer_callback(self):
+        # print(f"Debug: Timer expired, set output {self.key_out} off.")
+        for out in self.key_out:
+            asyncio.create_task(self.access.write_value(out, False))
+
+    def _timer_kill(self):
+        if self._timer:
+            self._timer.kill()
+            self._timer = None
+
+    def _set_value(self, value: bool):
+        for key in self.key_out:
+            asyncio.create_task(self.access.write_value(key, value))
         # Is an automatic off timer requested ?
         if self.on_time is not None:
             if value is False:
@@ -220,14 +275,13 @@ class Switch(Building):
     async def on_change_di(self, id: int, snapshot: dict[int, VariableStateModel]):
         # Sanity check 
         self.sanity_check(id)
-        # in_value = snapshot[id].value
         # print(f"Debug: Input {self.key_in} changed to {in_value}")
 
         if snapshot[id].value is True:
             self._timer_kill()
             # Toogle output value
             variable_names = self.require_variable_names()
-            out_value = snapshot[variable_names[self.key_out]].value
+            out_value = snapshot[variable_names[self.key_out[0]]].value
             out_value = not out_value
             self._set_value(out_value)
 
