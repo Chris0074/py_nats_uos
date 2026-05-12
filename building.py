@@ -1,4 +1,4 @@
-from typing import Awaitable, Callable, Iterable, Tuple
+from typing import Awaitable, Callable, Iterable, Sequence
 from collections.abc import Iterable as AbcIterable
 import sys
 import pathlib
@@ -172,10 +172,11 @@ class CyclicTask:
 
 
 class Switch(Building):
+    # on_time is in seconds
     def __init__(self, key_in: str|Iterable[str], key_out: str|Iterable[str], on_time: int | None = None):
         super().__init__()
-        self.key_in = [key_in,] if isinstance(key_in, str) else key_in
-        self.key_out = [key_out,] if isinstance(key_out, str) else key_out
+        self.key_in = (key_in,) if isinstance(key_in, str) else key_in
+        self.key_out = (key_out,) if isinstance(key_out, str) else key_out
         self.on_time = on_time
 
         self._timer = None
@@ -227,10 +228,10 @@ class Switch(Building):
                 self._set_value(False)
 
 class Button(Building):
-    def __init__(self, key_in: str|Iterable[str], key_out: str|Tuple[str], on_time: int | None = None):
+    def __init__(self, key_in: str|Iterable[str], key_out: str|Sequence[str], on_time: int | None = None):
         super().__init__()
-        self.key_in: Iterable[str] = [key_in,] if isinstance(key_in, str) else key_in
-        self.key_out: Tuple[str] = (key_out,) if isinstance(key_out, str) else key_out
+        self.key_in: Iterable[str] = (key_in,) if isinstance(key_in, str) else key_in
+        self.key_out: Sequence[str] = (key_out,) if isinstance(key_out, str) else key_out
         self.on_time = on_time
 
         self._timer = None
