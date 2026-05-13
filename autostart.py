@@ -16,11 +16,13 @@ SRC_PATH = ROOT_PATH.joinpath("src")
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from building import Switch, Raffstore, CyclicTask
+from building import Switch, Button, Raffstore, CyclicTask
 
 from in_out import DI_3_0, DI_3_1, DI_3_2, DI_3_3, DI_3_4, DI_3_5, DI_3_6, DI_3_7, DI_3_8, DI_3_9, DI_3_10, DI_3_11, DI_3_12, DI_3_13, DI_3_14, DI_3_15
 from in_out import DO_3_0, DO_3_1, DO_3_2, DO_3_3, DO_3_4, DO_3_5, DO_3_6, DO_3_7, DO_3_8, DO_3_9, DO_3_10, DO_3_11, DO_3_12, DO_3_13, DO_3_14, DO_3_15
+
 from in_out import DI_1_0, DI_1_1, DI_1_2, DI_1_3, DI_1_4, DI_1_5, DI_1_6, DI_1_7, DI_1_8, DI_1_9, DI_1_10, DI_1_11, DI_1_12, DI_1_13, DI_1_14, DI_1_15
+from in_out import DO_1_0, DO_1_1, DO_1_2, DO_1_3, DO_1_4, DO_1_5, DO_1_6, DO_1_7, DO_1_8, DO_1_9, DO_1_10, DO_1_11, DO_1_12, DO_1_13, DO_1_14, DO_1_15
 
 from in_out import DI_2_0, DI_2_1, DI_2_2, DI_2_3, DI_2_4, DI_2_5, DI_2_6, DI_2_7, DI_2_8, DI_2_9, DI_2_10, DI_2_11, DI_2_12, DI_2_13, DI_2_14, DI_2_15
 from in_out import DO_2_0, DO_2_1, DO_2_2, DO_2_3, DO_2_4, DO_2_5, DO_2_6, DO_2_7, DO_2_8, DO_2_9, DO_2_10, DO_2_11, DO_2_12, DO_2_13, DO_2_14, DO_2_15
@@ -41,13 +43,29 @@ class RaffWrapper:
         self.raffstore.down(time_in_sec=self.down_time)
 
 
-all_up = DI_1_8
-all_down = DI_1_9 
-
 async def async_main():
-    # Simple push buttons    
-    await Switch(key_in=DI_2_0, key_out=DO_2_0).setup()
-    await Switch(key_in=DI_2_1, key_out=DO_2_1, on_time=5).setup()
+    # Simple push buttons   
+    # # Press button DI_1_0 then output DO_1_0 toogles
+    await Button(key_in=DI_1_0, key_out=DO_1_0).setup()
+    
+    # Press button DI_1_1 or DI_1_2 then output DO_1_1 toogles. DO1_1 is switched off automatically after 50s
+    await Button(key_in=(DI_1_1, DI_1_2), key_out=DO_1_1, on_time=50).setup()
+    
+    # Simple Switches
+    # As long as switch DI_1_3 is on, output DO_1_3 is on.
+    await Switch(key_in=DI_1_3, key_out=DO_1_3).setup()
+    
+    # As long as switch DI_1_3 or DI_1_5 is on, output DO_1_4 is on.
+    await Switch(key_in=(DI_1_4, DI_1_5), key_out=DO_1_4).setup()
+    
+    # As long as switch DI_1_6 is on, output DO_1_5 and DO_1_6 are on.
+    await Switch(key_in=DI_1_6, key_out=(DO_1_5, DO_1_6)).setup()
+    
+    # As long as switch DI_1_7 is on, output DO_1_7 is on. 60 seconds after DI_1_7 is off, DO_1_7 goes off too. (switch off delay)
+    await Switch(key_in=DI_1_7, key_out=DO_1_7, on_time=60).setup()
+    
+    all_up = DI_1_8
+    all_down = DI_1_9 
     
     # Up/down time for cyclic timers
     raff_tilt_time = 0.9
