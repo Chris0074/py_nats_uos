@@ -11,7 +11,7 @@ from nats_authent import OAuthCredentials
 from login import CLIENT_SCOPE, NATS_HOST, NATS_PORT
 from models import VariableDefinitionModel, VariableInfo, VariableAccess, VariableType, VariableStateModel
 from models import DATA_TYPE_TO_MODEL, ACCESS_TYPE_TO_MODEL
-from nats_subjects import read_variables_query, registry_provider_query, write_variables_command, vars_changed_event
+from nats_subjects import provider_changed_event, read_variables_query, registry_provider_query, write_variables_command, vars_changed_event
 from nats_payloads import build_read_variables_query, build_read_provider_definition_query, build_write_variables_command
 from weidmueller.ucontrol.hub.VariableValueInt64 import VariableValueInt64
 from weidmueller.ucontrol.hub.VariableValue import VariableValue
@@ -28,6 +28,7 @@ class DataHub:
     client_name: str
     client_id: str
     client_secret: str
+    client_scope: str = CLIENT_SCOPE
     nats_connection: NatsConnection | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
@@ -36,7 +37,7 @@ class DataHub:
             client_name=self.client_name,
             client_id=self.client_id,
             client_secret=self.client_secret,
-            scope=CLIENT_SCOPE,
+            scope=self.client_scope,
         )
 
     async def connect(self):
@@ -51,15 +52,15 @@ class DataHub:
         self.nats_connection = nats_conn
         logging.info("Connected to NATS server at %s as %s", self.host, self.client_name)
 
-    def close(self):
+    async def close(self):
         if self.nats_connection:
-            return self.nats_connection.close()
+            return await self.nats_connection.close()
         self.nats_connection = None
 
     def _verify_connection(self) -> NatsConnection:
         conn = self.nats_connection
         if conn is None:
-            raise RuntimeError("Not connected to any NATS server")
+            raise ConnectionError("Not connected to any NATS server. Call connect() first.")
         return conn
 
 
@@ -127,21 +128,17 @@ class AccessProvider(DataHub):
         response = ReadProviderDefinitionQueryResponse.GetRootAsReadProviderDefinitionQueryResponse(msg.data, 0)
         definition = response.ProviderDefinition()
         if definition is None:
-            raise RuntimeError(f"No definition of provider '{self.provider_id}' found.")
+            raise ValueError(f"No definition of provider '{self.provider_id}' found.")
         
         return self._decode_definition_models(definition)
     
     def _get_variable_by_name(self, key: str) -> VariableInfo:
-        if self.variable_name is None:
-            raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
-        if self.variable_ids is None:
+        if self.variable_name is None or self.variable_ids is None:
             raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
         var_id = self.variable_name.get(key)
         if var_id is None:
             raise KeyError(f"Variable with key '{key}' not found in provider definition.")
-        var = self.variable_ids.get(var_id)
-        if var is None: 
-            raise KeyError(f"Variable with key '{key}' not found in provider definition.")
+        var = self.variable_ids[var_id]  # Will raise KeyError if inconsistent
         return var
 
     def _get_variable_by_id(self, key: int) -> VariableInfo:
@@ -149,10 +146,11 @@ class AccessProvider(DataHub):
             raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
         var = self.variable_ids.get(key)
         if var is None:
-                raise KeyError(f"Variable with ID '{key}' not found in provider definition.")
+            raise KeyError(f"Variable with ID '{key}' not found in provider definition.")
         return var
     
     def verify_startup(self) -> NatsConnection:
+        """Verify that connection is established and provider definition is loaded."""
         conn = self._verify_connection()
         if self.variable_ids is None or self.variable_name is None:
             raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
@@ -201,45 +199,46 @@ class AccessProvider(DataHub):
 
         return value
     
-    def _decode_values(self, var_list, selected: dict[int, VariableInfo]) -> list[VariableStateModel]:
+    def _decode_values(self, var_list, variable_ids: dict[int, VariableInfo] | None = None) -> list[VariableStateModel]:
+        """Decode variable values from response or event data.
+        
+        Args:
+            var_list: The variable list from NATS response/event
+            variable_ids: Optional mapping of variable IDs to VariableInfo. Defaults to self.variable_ids if None.
+        
+        Returns:
+            List of decoded VariableStateModel objects
+            
+        Raises:
+            RuntimeError: If provider definition is not loaded and variable_ids not provided.
+        """
         if not var_list:
             return []
+        
+        if variable_ids is None:
+            variable_ids = self.variable_ids
+            if variable_ids is None:
+                raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
+        
         base_ts = var_list.BaseTimestamp()
         base_ns = base_ts.Seconds() * 1_000_000_000 + base_ts.Nanos()
 
         rows: list[VariableStateModel] = []
         for idx in range(var_list.ItemsLength()):
-            key = var_list.Items(idx).Id()
             item = var_list.Items(idx)
             value = self._get_value_from_item(item)
             if value is None:
                 continue
-            rows.append(                
-                VariableStateModel(id=item.Id(), key=key, value=value, timestamp_ns=base_ns, definition=selected.get(item.Id()))
+            rows.append(
+                VariableStateModel(
+                    id=item.Id(),
+                    key=item.Id(),
+                    value=value,
+                    timestamp_ns=base_ns,
+                    definition=variable_ids.get(item.Id())
+                )
             )
         return rows
-    
-    def _update_states(self, var_list) -> list[VariableStateModel]:
-        if not var_list:
-            return []
-        variable_ids = self.variable_ids
-        if variable_ids is None:
-            raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
-        base_ts = var_list.BaseTimestamp()
-        base_ns = base_ts.Seconds() * 1_000_000_000 + base_ts.Nanos()
-
-        changed: list[VariableStateModel] = []
-
-        for i in range(var_list.ItemsLength()):
-            key = var_list.Items(i).Id()
-            item = var_list.Items(i)
-            value = self._get_value_from_item(item)
-            if value is None:
-                continue
-            state = VariableStateModel(id=item.Id(), key=key, value=value, timestamp_ns=base_ns, definition=variable_ids.get(item.Id()))
-            changed.append(state)
-
-        return changed
     
     def _convert_value(self, model: VariableDefinitionModel, value: str):
         if model.data_type == VariableType.INT64:
@@ -271,13 +270,13 @@ class AccessProvider(DataHub):
             raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
         variable = self.get_variable_from_definition(key_id)
         response = await self._process_read_request([variable.id])
-        values = self._decode_values(response.Variables(), variable_ids)
+        values = self._decode_values(response.Variables())
         #print("Response-Payload:", response.Variables(), "Decoded:", value)
 
         if not values:
-            raise ValueError(f"No values received for variable '{key_id}'.")
+            raise ConnectionError(f"No values received for variable '{key_id}'. Provider may be offline.")
         elif len(values) > 1:
-            raise ValueError(f"Warning: Multiple values received for variable '{key_id}'. Only one should be returned.")
+            raise RuntimeError(f"Multiple values received for variable '{key_id}'. Expected exactly one.")
 
         return values[0].value if values else None
     
@@ -290,7 +289,7 @@ class AccessProvider(DataHub):
         if var_model is None:
             raise RuntimeError(f"No model for variable '{variable.key}' available")
         if var_model.access != VariableAccess.READ_WRITE:
-            raise RuntimeError(f"Variable '{var_model.key}' (ID:{var_model.id}) is not writable.")
+            raise ValueError(f"Variable '{var_model.key}' (ID:{var_model.id}) is not writable.")
 
         converted_value = self._convert_value(var_model, str(value))
         state = VariableStateModel(id=var_model.id, key=var_model.key, value=converted_value, timestamp_ns=time.time_ns())
@@ -299,7 +298,7 @@ class AccessProvider(DataHub):
         if self.provider_fingerprint is None:
             # Sanity check. For writing we need a fingerprint otherwise the value is not written.
             # This should not happen if the provider definition is properly loaded at startup.
-            raise RuntimeError("Provider definition not loaded. Call get_definition() first.")
+            raise RuntimeError("Provider fingerprint not available. Provider definition may not be loaded. Call get_definition() first.")
         
         payload = build_write_variables_command([var_model], [state], self.provider_fingerprint)
         #print(f"Write-Subject: {subject}")
@@ -310,7 +309,7 @@ class AccessProvider(DataHub):
     
     async def _handle_event(self, msg: Msg):
         event = VariablesChangedEvent.GetRootAsVariablesChangedEvent(msg.data, 0)
-        changed_variables: list[VariableStateModel] = self._update_states(event.ChangedVariables())
+        changed_variables: list[VariableStateModel] = self._decode_values(event.ChangedVariables())
         if not changed_variables:
             return
         # update snapshot with changed variables
@@ -347,10 +346,70 @@ class AccessProvider(DataHub):
     async def request_snapshot(self) -> dict[int, VariableStateModel]:
         self._verify_connection()        
         response = await self._process_read_request(None)
-        variables = self._update_states(response.Variables())
+        variables = self._decode_values(response.Variables())
         return {var.id: var for var in variables}
     
     async def stop(self) -> None:
+        """Close the connection to NATS server.
+        
+        Raises:
+            ConnectionError: If not connected to any NATS server.
+        """
         conn = self._verify_connection()
         await conn.close()
         self.nats_connection = None
+        
+
+
+from src.nats_payloads import build_provider_definition_event, build_variables_changed_event, build_read_variables_response, build_read_variables_query
+
+# Keys appear exactly like this inside the u-OS Data Hub tree.
+VARIABLE_DEFINITIONS = [
+    VariableDefinitionModel(
+        5,
+        "diagnostics.status_text",
+        VariableType.STRING,
+        VariableAccess.READ_WRITE,
+    ),
+    VariableDefinitionModel(
+        6,
+        "diagnostics.error_count",
+        VariableType.INT64,
+        VariableAccess.READ_WRITE,
+    ),
+    VariableDefinitionModel(
+        7,
+        "diagnostics.temperature",
+        VariableType.FLOAT64,
+        VariableAccess.READ_ONLY,
+    ),
+    VariableDefinitionModel(
+        8,
+        "diagnostics.is_running",
+        VariableType.BOOLEAN,
+        VariableAccess.READ_WRITE,
+    ),
+]
+
+class RegisterProvider(DataHub):    
+    def __init__(self, host: str, provider_id: str, client_name: str, client_id: str, client_secret: str):
+        super().__init__(host=host, client_name=client_name, client_id=client_id, client_secret=client_secret)        
+
+        if provider_id != client_name:
+            raise ValueError("Provider ID must match the client name for registering a provider.")
+        self.provider_id = provider_id
+
+        self.provider_fingerprint: int | None = None
+        #self.variable_ids: dict[int, VariableInfo] | None = None
+        #self.variable_name: dict[str, int] | None = None
+        #self._registered_callbacks: dict[int, list[Callable[[int, dict[int,VariableStateModel]], None | Awaitable[None]]]] = {}
+        #self.already_subscribed_to_change: bool = False
+        #self.snapshot: dict[int, VariableStateModel] | None = None
+
+    async def register_provider_definition(self, variable_definition: list[VariableDefinitionModel] | None = None) -> None:
+        if variable_definition is None or not variable_definition:
+            variable_definition = VARIABLE_DEFINITIONS
+        payload, fingerprint = build_provider_definition_event(variable_definition)
+        self._fingerprint = fingerprint
+        conn = self.nats_connection
+        await conn.publish(provider_changed_event(self.provider_id), payload)
