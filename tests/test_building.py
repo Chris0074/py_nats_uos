@@ -1,6 +1,7 @@
 import sys
 import pathlib
 import pytest
+import datetime
 
 # Add the project root to Python path to enable absolute imports
 ROOT_PATH = pathlib.Path(__file__).resolve().parent.parent
@@ -10,7 +11,7 @@ SRC_PATH = ROOT_PATH.joinpath("src")
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from building import Building, Raffstore
+from building import Building, DailyTask, Raffstore
 
 
 class DummyAccessProvider:
@@ -95,3 +96,63 @@ def test_shared_access_provider_can_be_reused():
     # Both instances should share the provider, but not object state.
     assert first is not second
     assert first.in_up != second.in_up
+
+
+def test_cyclic_task_uses_fixed_interval_seconds():
+    calls = []
+
+    async def callback():
+        calls.append("run")
+
+    task = DailyTask(callback=callback, time="7:00")
+
+    assert task.hour == 7
+    assert task.minute == 0
+    assert task.callbacks == [callback]
+
+
+def test_daily_task_invalid_time_uses_fallback():
+    async def cb():
+        pass
+
+    task = DailyTask(callback=cb, time="25:00")
+    # Invalid time should fall back to default (7:00)
+    assert task.hour == 7
+    assert task.minute == 0
+
+
+def test_next_run_time_rolls_over_to_next_day():
+    # pick a fixed 'now' after the scheduled time to force rollover
+    task = DailyTask(callback=lambda: None, time="08:30")
+    fixed_now = datetime.datetime(2026, 1, 1, 9, 0, tzinfo=DailyTask.time_zone)
+
+    # monkeypatch _now to return our fixed time
+    task._now = lambda: fixed_now
+    next_run = task._next_run_time()
+
+    expected = fixed_now.replace(hour=8, minute=30, second=0, microsecond=0) + datetime.timedelta(days=1)
+    assert next_run == expected
+
+
+@pytest.mark.asyncio
+async def test_update_restarts_task_and_sets_time():
+    task = DailyTask(callback=lambda: None, time="07:00")
+
+    # start the task and ensure it is running
+    task.start()
+    assert task.is_running is True
+
+    # update the time and ensure hour/minute changed and task restarted
+    task.update("09:15")
+    assert task.hour == 9
+    assert task.minute == 15
+    assert task.is_running is True
+
+    # calling start again should be idempotent (no duplicate tasks)
+    first_task = task._task
+    task.start()
+    assert task._task is first_task
+
+    # finally stop the task
+    task.stop()
+    assert task.is_running is False

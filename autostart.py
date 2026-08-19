@@ -7,6 +7,7 @@ import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Add the project root to Python path to enable absolute imports
 ROOT_PATH = pathlib.Path(__file__).resolve().parent
@@ -16,7 +17,7 @@ SRC_PATH = ROOT_PATH.joinpath("src")
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from building import Switch, Button, Raffstore, CyclicTask
+from building import DailyTask, Switch, Button, Raffstore
 
 from in_out import DI_3_0, DI_3_1, DI_3_2, DI_3_3, DI_3_4, DI_3_5, DI_3_6, DI_3_7, DI_3_8, DI_3_9, DI_3_10, DI_3_11, DI_3_12, DI_3_13, DI_3_14, DI_3_15
 from in_out import DO_3_0, DO_3_1, DO_3_2, DO_3_3, DO_3_4, DO_3_5, DO_3_6, DO_3_7, DO_3_8, DO_3_9, DO_3_10, DO_3_11, DO_3_12, DO_3_13, DO_3_14, DO_3_15
@@ -26,6 +27,8 @@ from in_out import DO_1_0, DO_1_1, DO_1_2, DO_1_3, DO_1_4, DO_1_5, DO_1_6, DO_1_
 
 from in_out import DI_2_0, DI_2_1, DI_2_2, DI_2_3, DI_2_4, DI_2_5, DI_2_6, DI_2_7, DI_2_8, DI_2_9, DI_2_10, DI_2_11, DI_2_12, DI_2_13, DI_2_14, DI_2_15
 from in_out import DO_2_0, DO_2_1, DO_2_2, DO_2_3, DO_2_4, DO_2_5, DO_2_6, DO_2_7, DO_2_8, DO_2_9, DO_2_10, DO_2_11, DO_2_12, DO_2_13, DO_2_14, DO_2_15
+
+from register_variables import InitProviderVariables, RaffTiltTime, RaffUpTime, RaffDownTime
 
 class RaffWrapper:
     def __init__(self, in_up, in_down, out_up, out_down, max_run_time=40, up_time=0.7):
@@ -41,6 +44,9 @@ class RaffWrapper:
         
     def down(self) -> None:
         self.raffstore.down(time_in_sec=self.down_time)
+        
+    def set_up_time(self, time: float):
+        self.up_time = time
 
 
 async def async_main():
@@ -67,8 +73,8 @@ async def async_main():
     all_up = DI_1_8
     all_down = DI_1_9 
     
-    # Up/down time for cyclic timers
-    raff_tilt_time = 0.9
+    # Raffstore tilt time for daily timers in seconds
+    raff_tilt_time = 0.4
     
     # Raffstore with two inputs, one for up and one for down. Both inputs are also used to raise/lower all raffstores at the same time.
     in_up = (DI_3_14, all_up)
@@ -86,19 +92,33 @@ async def async_main():
     keller_links = RaffWrapper(in_up=in_up, in_down=in_down, out_up=out_up, out_down=out_down, up_time=raff_tilt_time, max_run_time=60)
     await keller_links.setup()
 
-    # Clyclic timer to raise all raffstores at 07:00
-    callbacks_up = [buero.up, keller_links.up]
-    CyclicTask(callback=callbacks_up, hour=7, minute=0).start()
-    
-    # Cyclic timer to lower all raffstores at 22:00    
-    callback_down = [buero.down, keller_links.down]
-    CyclicTask(callback=callback_down, hour=22, minute=0).start()
 
+    # Daily timer to raise all raffstores at 07:00
+    callbacks_up = [buero.up, keller_links.up]
+    raise_time = DailyTask(callback=callbacks_up, time="7:00")
+    raise_time.start()
+    
+    # Daily timer to lower all raffstores at 22:00    
+    callbacks_down = [buero.down, keller_links.down]
+    fall_time = DailyTask(callback=callbacks_down, time="22:00")
+    fall_time.start()
+    
+    # ----- Update provider variables with initial values and register callbacks -----
+    variables = InitProviderVariables()
+    await variables.setup()
+    # Update raffstore up-time via callback
+    await variables.init(RaffUpTime.id, "7:00", [raise_time.update])
+    # Update raffstore down time via callback
+    await variables.init(RaffDownTime.id, "22:00", [fall_time.update])
+    # Update raffstore tilt-time via callbacks
+    callbacks_tilt_time = (buero.set_up_time, keller_links.set_up_time, )
+    await variables.init(RaffTiltTime.id, raff_tilt_time, callbacks_tilt_time)
+        
     try:
         while True:            
             await asyncio.sleep(10)
     except KeyboardInterrupt:
-        logging.info("Stop...")
+        logger.info("Stop...")
     finally:
         #await access_provider.close()
         pass

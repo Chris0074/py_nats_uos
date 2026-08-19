@@ -1,0 +1,10 @@
+# Requirements used for running the test suite and pytest plugins
+# Keep test/tooling dependencies separate from runtime requirements.
+pytest>=8.4.0
+pytest-asyncio>=0.21.0
+anyio>=3.6.2
+pytest-cov>=4.0.0
+
+# Optional helpers (uncomment if needed)
+# pytest-xdist>=3.1.0  # parallel test execution
+# freezegun>=1.2.0    # time-freezing utilities for deterministic tests

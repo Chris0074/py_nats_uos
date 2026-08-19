@@ -1,11 +1,15 @@
-from typing import Awaitable, Callable, Iterable, Sequence
-from collections.abc import Iterable as AbcIterable
-import sys
-import pathlib
 import asyncio
-import inspect
 import datetime
+import inspect
+import pathlib
+import sys
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from zoneinfo import ZoneInfo
+
+try:
+    TIME_ZONE = ZoneInfo("Europe/Vienna")
+except Exception:
+    TIME_ZONE = datetime.timezone.utc
 
 # Add the project root to Python path to enable absolute imports
 ROOT_PATH = pathlib.Path(__file__).resolve().parent
@@ -17,7 +21,15 @@ from login import CLIENT_ID, CLIENT_NAME, CLIENT_SECRET, NATS_HOST, PROVIDER_SBM
 from src.data_hub import AccessProvider
 from src.models import VariableInfo, VariableStateModel
 
-class Building():
+import logging
+
+logger = logging.getLogger(__name__)
+
+Callback = Callable[[], None | Awaitable[None]]
+CallbackInput = Callback | Iterable[Callback]
+
+
+class Building:
     _access_provider: AccessProvider | None = None
     _variables_names: dict[str, int] | None = None
     _variables_ids: dict[int, VariableInfo] | None = None
@@ -52,7 +64,7 @@ class Building():
         return self.variables_names
 
     class Timer:
-        def __init__(self, timeout: float, callback: Callable[[], None | Awaitable[None]] | None = None):
+        def __init__(self, timeout: float, callback: Callback | None = None):
             self._timeout = timeout
             self._callback = callback
             self._task = None
@@ -81,7 +93,7 @@ class Building():
                 # print("Killing timer...")
                 self._task.cancel()
                 
-        def set_callback(self, function: Callable[[], None | Awaitable[None]]):
+        def set_callback(self, function: Callback):
             self._callback = function
             
         def set_timeout(self, timeout: float):
@@ -92,33 +104,43 @@ class Building():
             return False if self._task is None else True
 
 
-class CyclicTask:
+class DailyTask:
     """Run one or more callbacks every day at a fixed time.
 
     Example:
-        task = CyclicTask(hour=8, minute=0, callback=my_async_function)
+        task = DailyTask(callback=my_async_function, time="7:00")
         task.start()
 
-        task = CyclicTask(hour=8, minute=0, callback=[task_a, task_b])
+        task = DailyTask(callback=[task_a, task_b], time="8:00")
         task.start()
     """
     # Set a timezone
-    time_zone = ZoneInfo("Europe/Vienna")
+    time_zone = TIME_ZONE
 
-    def __init__(
-        self,
-        callback: Callable[[], None] | Iterable[Callable[[], None]],
-        hour: int,
-        minute: int = 0,
-    ):
-        if isinstance(callback, AbcIterable) and not callable(callback):
+    def __init__(self, callback: CallbackInput, time: str):
+        if isinstance(callback, Iterable) and not callable(callback):
             self.callbacks = list(callback)
         else:
             self.callbacks = [callback]
-        self.hour = hour
-        self.minute = minute
+        self.hour = 7
+        self.minute = 0
         self._task: asyncio.Task | None = None
         self._cancelled = False
+        self.hour, self.minute = self._convert_time(time, fallback=(self.hour, self.minute))
+
+    def _convert_time(self,time: str, fallback: tuple[int, int]) -> tuple[int, int]:
+        """Convert time string in format "HH:MM" to a tuple of integers (hour, minute)."""
+        try:
+            hour_str, minute_str = time.split(":")
+            hour = int(hour_str)
+            minute = int(minute_str)
+            if not (0 <= hour < 24) or not (0 <= minute < 60):
+                raise ValueError
+            return hour, minute
+        except ValueError:
+            logger.warning(f"Invalid time format: '{time}'. Expected 'HH:MM'. Using fallback: {fallback}.")
+            logger.info(f"Using fallback time: {fallback}")
+            return fallback
         
     def _now(self) -> datetime.datetime:
         return datetime.datetime.now(self.time_zone)
@@ -137,7 +159,7 @@ class CyclicTask:
                 now = self._now()
                 while next_run > now:
                     delay = (next_run - now).total_seconds()
-                    # print(f"Debug: Cyclic task sleeping for {delay:.1f} seconds until next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+                    # print(f"Debug: Daily task sleeping for {delay:.1f} seconds until next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
                     # Sleeping is set to max 3600 seconds. If the next run is more than one hour away, the loop will wake up every hour 
                     # to check if the next run time has changed (e.g. due to daylight saving time changes).
                     await asyncio.sleep(min(3600, delay))
@@ -159,16 +181,22 @@ class CyclicTask:
             return
         self._cancelled = False
         self._task = asyncio.create_task(self._run())
-        #'print(f"CyclicTask started, will run daily at {self.hour:02d}:{self.minute:02d}.")
+        #'print(f"DailyTask started, will run daily at {self.hour:02d}:{self.minute:02d}.")
 
     def stop(self):
         self._cancelled = True
         if self._task is not None:
             self._task.cancel()
+            self._task = None
 
     @property
     def is_running(self) -> bool:
         return self._task is not None
+    
+    def update(self, time: str):
+        self.stop()
+        self.hour, self.minute = self._convert_time(time, (self.hour, self.minute))
+        self.start()
 
 
 class Switch(Building):
@@ -297,13 +325,10 @@ class Raffstore(Building):
         self.run_sec = run_time
         self.short_run_sec = 1.5
         self.wait_sec = 0.1
-        
-        if isinstance(in_up, str):
-            self.in_up = [in_up]
-        if isinstance(in_down, str):
-            self.in_down = [in_down]
 
-     
+        self._in_up_keys = (in_up,) if isinstance(in_up, str) else tuple(in_up)
+        self._in_down_keys = (in_down,) if isinstance(in_down, str) else tuple(in_down)
+
         self._up_active = False
         self._down_active = False
         self._delay_timer = self.Timer(timeout=self.wait_sec)
@@ -313,10 +338,10 @@ class Raffstore(Building):
 
     async def setup(self):
         await super().setup()
-        for up in self.in_up:
+        for up in self._in_up_keys:
              #print(f"Debug: Subscribed to changes on {up}")
              await self.access.subscribe_change(up, self._on_change_up)
-        for down in self.in_down:
+        for down in self._in_down_keys:
              #print(f"Debug: Subscribed to changes on {down}")
              await self.access.subscribe_change(down, self._on_change_down)
              
@@ -408,7 +433,7 @@ class Raffstore(Building):
         in_value = snapshot[id].value        
         variable_names = self.require_variable_names()
         # Sanity check 
-        self._verify_subscribed_ids(id, self.in_up)
+        self._verify_subscribed_ids(id, self._in_up_keys)
         # print(f"Debug: Input {self.in_up} changed to {in_value}")
         
         # To be on the save side switch off counterpart
@@ -431,7 +456,7 @@ class Raffstore(Building):
         in_value = snapshot[id].value        
         variable_names = self.require_variable_names()
         # Sanity check 
-        self._verify_subscribed_ids(id, self.in_down)
+        self._verify_subscribed_ids(id, self._in_down_keys)
         # print(f"Debug: Input {self.in_down} changed to {in_value}")
         
         # To be on the save side switch off counterpart
